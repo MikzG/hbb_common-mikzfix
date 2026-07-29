@@ -73,7 +73,17 @@ lazy_static::lazy_static! {
     static ref KEY_PAIR: Mutex<Option<KeyPair>> = Default::default();
     static ref USER_DEFAULT_CONFIG: RwLock<(UserDefaultConfig, Instant)> = RwLock::new((UserDefaultConfig::load(), Instant::now()));
     pub static ref NEW_STORED_PEER_CONFIG: Mutex<HashSet<String>> = Default::default();
-    pub static ref DEFAULT_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+    // mikzfix: shipped defaults. DEFAULT_SETTINGS is the BASE layer in Config::get_options()
+    // (user config + OVERWRITE_SETTINGS layer on top), so these are starting values the user
+    // can still change — not forced settings.
+    pub static ref DEFAULT_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new(HashMap::from([
+        // Allow a fixed password alongside the one-time one, so a technician can set a permanent
+        // password on a client machine once and reconnect later unattended.
+        ("verification-method".to_owned(), "use-both-passwords".to_owned()),
+        // Direct LAN connections instead of always relaying through remote.mikzfix.tech.
+        ("enable-lan-discovery".to_owned(), "Y".to_owned()),
+        ("direct-server".to_owned(), "Y".to_owned()),
+    ]));
     pub static ref OVERWRITE_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
     pub static ref DEFAULT_DISPLAY_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
     pub static ref OVERWRITE_DISPLAY_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
@@ -83,6 +93,11 @@ lazy_static::lazy_static! {
     // mikzfix: seed builtin options at startup (OSS equivalent of the Pro custom-client config)
     pub static ref BUILTIN_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new(HashMap::from([
         ("hide-powered-by-me".to_owned(), "Y".to_owned()),
+        // Hides the "install for full functionality" nag card (content key `install_tip`).
+        // NOTE: this lives in BUILTIN_SETTINGS, not DEFAULT_SETTINGS — the UI reads it via
+        // mainGetBuildinOption(). It does NOT suppress `install_daemon_tip`, which
+        // buildInstallCard() explicitly exempts.
+        ("hide-help-cards".to_owned(), "Y".to_owned()),
     ]));
 }
 
@@ -2774,13 +2789,27 @@ fn is_option_can_save(
     true
 }
 
+/// mikzfix: true once a user has logged in against our rustdesk-api (rdapi.mikzfix.tech).
+/// `access_token` is written/cleared by the Flutter UserModel on login/logout, so this is the
+/// cheapest reliable signal available down here in hbb_common.
+#[inline]
+pub fn mikzfix_is_logged_in() -> bool {
+    !LocalConfig::get_option("access_token").is_empty()
+}
+
 #[inline]
 pub fn is_incoming_only() -> bool {
+    // mikzfix: logged-out clients are support RECEIVERS only (just the ID/password panel).
+    // Logging in (technician/admin) unlocks the full client, including outgoing control.
+    if mikzfix_is_logged_in() {
+        return false;
+    }
     HARD_SETTINGS
         .read()
         .unwrap()
         .get("conn-type")
-        .map_or(false, |x| x == ("incoming"))
+        // default `true` (not upstream's `false`): this build ships receive-only until login.
+        .map_or(true, |x| x == ("incoming"))
 }
 
 #[inline]
@@ -2808,7 +2837,12 @@ pub fn is_disable_tcp_listen() -> bool {
 
 #[inline]
 pub fn is_disable_settings() -> bool {
-    is_some_hard_opton("disable-settings")
+    // mikzfix: Settings are locked for logged-out (client/support-receiver) machines and
+    // unlocked once a technician logs in. Mirrors is_incoming_only()'s login gate.
+    if mikzfix_is_logged_in() {
+        return false;
+    }
+    true
 }
 
 #[inline]
